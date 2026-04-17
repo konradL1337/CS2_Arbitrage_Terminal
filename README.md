@@ -32,10 +32,10 @@ Building a reliable pipeline in the restricted CS2 ecosystem required solving se
    ```bash
    git clone https://github.com/konradL1337/CS2-Arbitrage-Terminal.git
    Install dependencies:
-pip install -r requirements.txt
-Configure environment:
-Create a .env file based on .env.example.
-Add your GEMINI_API_KEY and SKINPORT credentials.
-Run the components:
-Start the engine: python harvester.py
-Launch the dashboard: streamlit run app.py
+*pip install -r requirements.txt
+*Configure environment:
+*Create a .env file based on .env.example.
+*Add your GEMINI_API_KEY and SKINPORT credentials.
+*Run the components:
+*Start the engine: python harvester.py
+*Launch the dashboard: streamlit run app.py
