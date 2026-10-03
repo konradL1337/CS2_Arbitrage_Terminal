@@ -1,7 +1,10 @@
-.env
-*.db
-*.log
-*.csv
 venv/
 __pycache__/
-.vscode/
+*.pyc
+.env
+*.db
+*.db-wal
+*.db-shm
+node_modules/
+.agents/
+*.log

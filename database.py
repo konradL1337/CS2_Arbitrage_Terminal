@@ -3,8 +3,8 @@ database.py — CS2 Market Analytics Terminal
 Schema + idempotent migration layer.
 
 Migrations applied on every startup (safe, never drops data):
-  • price_history.external_price  — Skinport price per record
-  • simulated_trades.quantity     — number of units per position
+  • price_history.csfloat_price  — CSFloat price per record
+  • simulated_trades.quantity    — number of units per position
 """
 
 import sqlite3
@@ -57,7 +57,7 @@ def initialize_database() -> None:
         item_name      TEXT     NOT NULL,
         steam_price    REAL     NOT NULL,
         volume         INTEGER,
-        external_price REAL
+        csfloat_price REAL
     );
 
     CREATE INDEX IF NOT EXISTS idx_ph_item_ts
@@ -118,7 +118,7 @@ def insert_price_record(
 ) -> None:
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO price_history (item_name, steam_price, volume, external_price)"
+            "INSERT OR IGNORE INTO price_history (item_name, steam_price, volume, external_price)"
             " VALUES (?, ?, ?, ?);",
             (item_name, steam_price, volume, external_price),
         )

@@ -4,7 +4,7 @@ app.py — CS2 Market Analytics Terminal v8.1
 Naprawki vs v8:
   • Czas wyświetlany w strefie Europe/Warsaw (serwer działa w UTC).
   • Każda funkcja matematyczna (gap, multiplier, breakeven) sprawdza
-    czy OBIE ceny (Steam I Skinport) są != None przed obliczeniem.
+    czy OBIE ceny (Steam I CSFloat) są != None przed obliczeniem.
     Brak danych → szary myślnik "—", nigdy fałszywy wynik.
   • Sygnał WYBUCH: odpala się tylko gdy obie ceny są świeże i nie-NULL.
   • Portfel: sqlite3.Row konwertowane do dict przez dict(t) — brak AttributeError.
@@ -49,8 +49,8 @@ from database import (
 MAX_DATA_AGE_H       = 4.0
 SKP_FRESHNESS_MIN    = 60
 DELTA_STALENESS_MULT = 2.5
-VOL_HIGH             = 1_000
-VOL_MED              = 100
+VOL_HIGH             = 100
+VOL_MED              = 25
 VOL_MAX_BAR          = 50_000
 STEAM_FEE            = 0.85
 MIN_FEE_PLN          = 0.05
@@ -136,7 +136,7 @@ hr { border-color:var(--bdr2) !important; margin:4px 0 !important; }
 
 .alert-wybuch { background:#0a0800; border:1px solid #c8a000; padding:8px 14px; margin:2px 0; font-family:'IBM Plex Mono',monospace; font-size:0.72rem; display:flex; align-items:center; gap:12px; }
 .alert-icon  { font-size:1.1rem; flex-shrink:0; }
-.alert-name  { color:var(--hi); font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.alert-name  { color:var(--hi); font-weight:600; flex:1; min-width:0; white-space:normal; word-wrap:break-word; }
 .alert-meta  { color:#a09060; font-size:0.66rem; white-space:nowrap; }
 .alert-action{ color:#ffd700; font-weight:700; white-space:nowrap; }
 
@@ -151,14 +151,18 @@ hr { border-color:var(--bdr2) !important; margin:4px 0 !important; }
 .price-matrix tfoot tr { border-top:1px solid var(--bdr2); background:var(--bg); }
 .price-matrix tfoot td { padding:4px 8px; font-family:'IBM Plex Sans Condensed',sans-serif; font-size:0.58rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--dim); }
 
-.row-wybuch { background:linear-gradient(90deg,#1a1300 0%,#0c0900 100%); border-left:3px solid #ffd700 !important; }
+.row-signal { background:linear-gradient(90deg,#001a0a 0%,#000c04 100%); border-left:3px solid #00c853 !important; }
+.row-investigate { background:linear-gradient(90deg,#1a1300 0%,#0c0900 100%); border-left:3px solid #ff9500 !important; }
 
-.cell-item  { color:#7a9ab0; font-size:0.70rem; max-width:190px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cell-item  { color:#7a9ab0; font-size:0.70rem; max-width:none; white-space:normal; word-wrap:break-word; }
 .cell-price { color:#e8a000; font-weight:600; text-align:right; }
 .cell-skp   { color:#ff8c00; text-align:right; }
 .cell-await { color:#3d5166; text-align:right; font-style:italic; font-size:0.66rem; }
-.cell-gap-fire { color:#ffd700; font-weight:700; text-align:right; }
-.cell-gap-ok   { color:#5a7080; text-align:right; }
+.cell-net-pln { color:#e8a000; text-align:right; }
+.cell-net-roi-signal { color:#00c853; font-weight:700; text-align:right; }
+.cell-net-roi-investigate { color:#ff9500; font-weight:700; text-align:right; }
+.cell-net-roi-noise { color:#5a7080; text-align:right; }
+.cell-net-roi-no-data { color:#3d5166; font-style:italic; text-align:right; font-size:0.66rem; }
 .cell-multi-gold { color:#ffd700; font-weight:700; text-align:right; }
 .cell-multi-ok   { color:#00c853; text-align:right; }
 .cell-multi-low  { color:#5a7080; text-align:right; }
@@ -169,7 +173,12 @@ hr { border-color:var(--bdr2) !important; margin:4px 0 !important; }
 .cell-stale { color:#5a4010; text-align:right; font-size:0.66rem; }
 .cell-spark { padding:3px 8px; text-align:center; min-width:100px; }
 .cell-liq   { text-align:left; white-space:nowrap; }
-.cell-sig   { text-align:center; font-size:0.80rem; }
+.cell-status { text-align:center; font-size:0.70rem; }
+.status-signal { color:#00c853; font-weight:600; }
+.status-investigate { color:#ff9500; font-weight:600; }
+.status-noise { color:#ffffff; }
+.status-no-liquidity { color:#3d5166; }
+.status-no-data { color:#2a3a48; font-style:italic; }
 .cell-vol   { color:#4a6070; text-align:right; font-size:0.68rem; }
 .cell-qty   { color:#7a9ab0; text-align:right; }
 
@@ -337,47 +346,126 @@ def delta_info(item_name: str, hours: float) -> dict:
 # SIGNAL LOGIC — NULL-SAFE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def calc_price_gap(steam: float | None, skinport: float | None) -> float | None:
+def is_wybuch(steam: float | None, csfloat: float | None, skp_ts) -> tuple[bool, float | None]:
     """
-    Gap = (Steam - Skinport) / Steam
-    Zwraca None jeśli którakolwiek wartość jest None lub <= 0.
-    NIGDY nie oblicza na podstawie 0.0.
+    Sprawdza czy różnica cen między Steam a CSFloat przekracza próg WYBUCH_THRESHOLD.
+    
+    Args:
+        steam: Cena na Steam
+        csfloat: Cena na CSFloat
+        skp_ts: Timestamp danych CSFloat
+    
+    Returns:
+        (fired, gap):
+            - fired: True jeśli różnica przekracza próg i dane są świeże
+            - gap: Wartość różnicy jako ułamek (None jeśli brak danych)
     """
+    # Sprawdź czy mamy obie ceny
     s = _safe_float(steam)
-    k = _safe_float(skinport)
+    k = _safe_float(csfloat)
     if s is None or k is None:
-        return None
-    return (s - k) / s
-
-
-def is_wybuch(
-    steam:    float | None,
-    skinport: float | None,
-    skp_ts,
-) -> tuple[bool, float | None]:
-    """
-    Warunki (WSZYSTKIE muszą być spełnione):
-    1. Obie ceny != None i > 0
-    2. Skinport timestamp świeży (< SKP_FRESHNESS_MIN minut)
-    3. Gap > WYBUCH_THRESHOLD
-
-    Przy braku danych: (False, None) — nigdy nie generuje fałszywego sygnału.
-    """
-    gap = calc_price_gap(steam, skinport)
-    if gap is None:
         return False, None
-
+    
+    # Sprawdź świeżość danych CSFloat
     skp_age_min = age_minutes(skp_ts)
     if skp_age_min is None or skp_age_min > SKP_FRESHNESS_MIN:
-        return False, gap
+        return False, None
+    
+    # Oblicz różnicę (gap)
+    gap = (s * STEAM_FEE - k) / k
+    
+    # Sprawdź czy przekracza próg
+    fired = gap >= WYBUCH_THRESHOLD
+    
+    return fired, gap
 
-    return gap > WYBUCH_THRESHOLD, gap
 
-
-def calc_multiplier(steam: float | None, skinport: float | None) -> float | None:
-    """(Steam × 0.85) / Skinport. None jeśli brakuje danych."""
+def calc_steam_receive(steam: float | None) -> float | None:
+    """
+    Pieniądze, które otrzymujesz ze sprzedaży na Steam.
+    Steam_Receive = Steam_Price / 1.15
+    Zwraca None jeśli wartość jest None lub <= 0.
+    """
     s = _safe_float(steam)
-    k = _safe_float(skinport)
+    if s is None:
+        return None
+    return s / 1.15
+
+
+def calc_net_pln(steam: float | None, csfloat: float | None) -> float | None:
+    """
+    Zysk Netto (Net PLN) = Steam_Receive - Cost
+    Zwraca None jeśli którakolwiek wartość jest None lub <= 0.
+    """
+    steam_receive = calc_steam_receive(steam)
+    cost = _safe_float(csfloat)
+    if steam_receive is None or cost is None:
+        return None
+    return steam_receive - cost
+
+
+def calc_net_roi(steam: float | None, csfloat: float | None) -> float | None:
+    """
+    Net ROI (%) = (Net_PLN / Cost) * 100
+    Zwraca None jeśli którakolwiek wartość jest None lub <= 0.
+    """
+    net_pln = calc_net_pln(steam, csfloat)
+    cost = _safe_float(csfloat)
+    if net_pln is None or cost is None or cost == 0:  # Dodatkowe zabezpieczenie przed dzieleniem przez zero
+        return None
+    return (net_pln / cost) * 100
+
+
+def determine_status(
+    steam: float | None,
+    csfloat: float | None,
+    skp_ts,
+    volume: int | None
+) -> tuple[str, str, float | None]:
+    """
+    Określa status sygnału na podstawie wolumenu i Net ROI.
+    
+    Zwraca: (status_code, status_display, net_roi)
+    
+    Status:
+    - Jeśli wolumen Steam < 5: Status = "NO LIQUIDITY" (Szary)
+    - Jeśli Net_ROI < 5%: Status = "NOISE" (Biały)
+    - Jeśli Net_ROI >= 5% i <= 20%: Status = "SIGNAL" (Zielony)
+    - Jeśli Net_ROI > 20%: Status = "INVESTIGATE" (Żółty/Pomarańczowy)
+    
+    Przy braku danych: ("no_data", "NO DATA", None)
+    """
+    # Sprawdź czy mamy obie ceny
+    if steam is None or csfloat is None:
+        return "no_data", "NO DATA", None
+    
+    # Sprawdź świeżość danych CSFloat
+    skp_age_min = age_minutes(skp_ts)
+    if skp_age_min is None or skp_age_min > SKP_FRESHNESS_MIN:
+        return "no_data", "NO DATA", None
+    
+    # Sprawdź wolumen
+    if volume is None or volume < 5:
+        return "no_liquidity", "NO LIQUIDITY", None
+    
+    # Oblicz Net ROI
+    net_roi = calc_net_roi(steam, csfloat)
+    if net_roi is None:
+        return "no_data", "NO DATA", None
+    
+    # Określ status na podstawie Net ROI
+    if net_roi < 5:
+        return "noise", "NOISE", net_roi
+    elif 5 <= net_roi <= 20:
+        return "signal", "SIGNAL", net_roi
+    else:  # net_roi > 20
+        return "investigate", "INVESTIGATE", net_roi
+
+
+def calc_multiplier(steam: float | None, csfloat: float | None) -> float | None:
+    """(Steam × 0.85) / CSFloat. None jeśli brakuje danych."""
+    s = _safe_float(steam)
+    k = _safe_float(csfloat)
     if s is None or k is None:
         return None
     return (s * STEAM_FEE) / k
@@ -413,7 +501,7 @@ def liquidity_score(vol) -> tuple[str, str, str]:
     if vol is None:
         return '<span class="liq-none">—</span>', "none", ""
     v = int(vol)
-    bar_color = "#00c853" if v >= VOL_HIGH else ("#e8a000" if v >= VOL_MED else "#f5222d")
+    bar_color = "#00c853" if v >= VOL_HIGH else ("#e8a000" if v >= VOL_MED else ("#f5222d" if v >= 5 else "#3d5166"))
     bar_w = max(round(min(v / VOL_MAX_BAR, 1.0) * 52), 1)
     bar   = (f'<span class="vol-bar-wrap">'
              f'<span class="vol-bar-fill" style="width:{bar_w}px;background:{bar_color}"></span>'
@@ -423,7 +511,9 @@ def liquidity_score(vol) -> tuple[str, str, str]:
         return f'<span class="liq-high">🔥 HIGH</span> <span class="cell-vol">({vol_fmt})</span>', "high", bar
     if v >= VOL_MED:
         return f'<span class="liq-med">🟢 MED</span> <span class="cell-vol">({vol_fmt})</span>', "med", bar
-    return f'<span class="liq-danger">🔴 LOW</span> <span class="cell-vol">({vol_fmt})</span>', "danger", bar
+    if v >= 5:
+        return f'<span class="liq-danger">🔴 LOW</span> <span class="cell-vol">({vol_fmt})</span>', "danger", bar
+    return f'<span class="liq-none">⚫ DEAD</span> <span class="cell-vol">({vol_fmt})</span>', "none", bar
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -453,28 +543,50 @@ def make_svg_spark(prices: list, stale: bool = False, w: int = 100, h: int = 26)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WYBUCH ALERT BANNERS
+# SIGNAL ALERT BANNERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def render_wybuch_banners(rows: list) -> None:
-    fired = [r for r in rows if r["_wybuch"]]
-    if not fired:
+def render_signal_banners(rows: list) -> None:
+    # Filtruj tylko elementy z statusem "signal" lub "investigate"
+    signals = []
+    for r in rows:
+        steam_price = r["PRICE"]
+        csfloat_price = r["_skp"]
+        status_code, _, net_roi = determine_status(
+            steam_price, csfloat_price, r.get("_skp_ts"), r["VOL"]
+        )
+        if status_code in ["signal", "investigate"]:
+            signals.append((r, status_code, net_roi))
+    
+    if not signals:
         return
+        
     banners = []
-    for r in fired:
-        gap_pct = r["_gap"] * 100 if r["_gap"] is not None else 0
+    for r, status_code, net_roi in signals:
+        # Określ styl alertu na podstawie statusu
+        alert_class = "alert-wybuch"  # Używamy tej samej klasy CSS dla spójności
+        icon = "🔔" if status_code == "signal" else "⚠️"
+        action_text = "SIGNAL - SPRAWDŹ OKAZJĘ" if status_code == "signal" else "INVESTIGATE - SPRAWDŹ ANOMALIĘ"
+        action_color = "#00c853" if status_code == "signal" else "#ff9500"
+        
+        net_pln = calc_net_pln(r["PRICE"], r["_skp"])
+        net_pln_str = f"{net_pln:.2f}" if net_pln is not None else "—"
+        net_roi_str = f"{net_roi:.2f}%" if net_roi is not None else "—"
+        
         banners.append(
-            f'<div class="alert-wybuch">'
-            f'<span class="alert-icon">⚡</span>'
+            f'<div class="{alert_class}">'
+            f'<span class="alert-icon">{icon}</span>'
             f'<span class="alert-name">{r["ITEM"]}</span>'
             f'<span class="alert-meta">'
             f'Steam <b style="color:#e8a000">{fmt_price(r["PRICE"])} zł</b>'
             f' &nbsp;│&nbsp; '
-            f'Skinport <b style="color:#ff8c00">{fmt_price(r["_skp"])} zł</b>'
+            f'CSFloat <b style="color:#ff8c00">{fmt_price(r["_skp"])} zł</b>'
             f' &nbsp;│&nbsp; '
-            f'Gap <b style="color:#ffd700">+{gap_pct:.1f}%</b>'
+            f'Net PLN <b style="color:#e8a000">{net_pln_str}</b>'
+            f' &nbsp;│&nbsp; '
+            f'Net ROI <b style="color:#00c853">{net_roi_str}</b>'
             f'</span>'
-            f'<span class="alert-action">⚡ WYBUCH / LAG — KUP NA STEAM</span>'
+            f'<span class="alert-action" style="color:{action_color}">{action_text}</span>'
             f'</div>'
         )
     st.markdown("".join(banners), unsafe_allow_html=True)
@@ -491,10 +603,20 @@ def render_price_matrix(rows: list, d3_lbl: str, d24_lbl: str) -> None:
             return "cell-nd"
         return "cell-up" if d["pct"] >= 0 else "cell-dn"
 
-    def gap_cls(gap: float | None, fired: bool) -> str:
-        if gap is None:
+    def net_pln_cls(net_pln: float | None) -> str:
+        if net_pln is None:
             return "cell-await"
-        return "cell-gap-fire" if fired else "cell-gap-ok"
+        return "cell-net-pln"
+        
+    def net_roi_cls(roi: float | None, status: str) -> str:
+        if roi is None:
+            return "cell-net-roi-no-data"
+        if status == "signal":
+            return "cell-net-roi-signal"
+        elif status == "investigate":
+            return "cell-net-roi-investigate"
+        else:  # noise, no_liquidity, no_data
+            return "cell-net-roi-noise"
 
     def multi_cls(m: float | None) -> str:
         if m is None:
@@ -509,14 +631,15 @@ def render_price_matrix(rows: list, d3_lbl: str, d24_lbl: str) -> None:
         "<thead><tr>"
         "<th>ITEM</th><th>SPARK</th>"
         "<th style='text-align:right'>STEAM (zł)</th>"
-        "<th style='text-align:right'>SKINPORT (zł)</th>"
+        "<th style='text-align:right'>CSFLOAT (zł)</th>"
         "<th style='text-align:right'>BREAKEVEN</th>"
         "<th style='text-align:right'>MULTIPLIER</th>"
-        "<th style='text-align:right'>PRICE GAP</th>"
+        "<th style='text-align:right'>NET PLN</th>"
+        "<th style='text-align:right'>NET ROI %</th>"
         f"<th style='text-align:right'>{d3_lbl}</th>"
         f"<th style='text-align:right'>{d24_lbl}</th>"
         "<th>PŁYNNOŚĆ</th>"
-        "<th style='text-align:center'>SYGNAŁ</th>"
+        "<th style='text-align:center'>STATUS</th>"
         "</tr></thead>"
     )
 
@@ -529,16 +652,29 @@ def render_price_matrix(rows: list, d3_lbl: str, d24_lbl: str) -> None:
     for r in rows:
         stale     = r["_stale"]
         svg       = make_svg_spark(r["_spark"], stale=stale)
-        row_cls   = "row-wybuch" if r["_wybuch"] else ""
         steam_cls = "cell-stale" if stale else "cell-price"
 
-        gap   = r["_gap"]
-        fired = r["_wybuch"]
-        # Jeśli gap jest None (brak danych Skinport) → wyświetl "Awaiting Data"
-        if gap is not None:
-            gap_str = f"+{gap*100:.1f}%" if gap >= 0 else f"{gap*100:.1f}%"
-        else:
-            gap_str = "—"
+        # Oblicz Net PLN i Net ROI
+        steam_price = r["PRICE"]
+        csfloat_price = r["_skp"]
+        net_pln = calc_net_pln(steam_price, csfloat_price)
+        net_roi = calc_net_roi(steam_price, csfloat_price)
+        
+        # Określ status
+        status_code, status_display, _ = determine_status(
+            steam_price, csfloat_price, r.get("_skp_ts"), r["VOL"]
+        )
+        
+        # Ustaw klasę wiersza na podstawie statusu
+        row_cls = ""
+        if status_code == "signal":
+            row_cls = "row-signal"
+        elif status_code == "investigate":
+            row_cls = "row-investigate"
+            
+        # Formatuj Net PLN i Net ROI
+        net_pln_str = f"{net_pln:.2f}" if net_pln is not None else "—"
+        net_roi_str = f"{net_roi:.2f}%" if net_roi is not None else "—"
 
         m = r["_multiplier"]
         multi_str = f"{m:.2f}×" if m is not None else "—"
@@ -549,8 +685,17 @@ def render_price_matrix(rows: list, d3_lbl: str, d24_lbl: str) -> None:
         badge, _, bar = liquidity_score(r["VOL"])
         d3  = r["_d3"]; d24 = r["_d24"]
 
-        sig_html = ('⚡ <b style="color:#ffd700">WYBUCH</b>' if fired
-                    else '<span style="color:#2a3a48">·</span>')
+        # Status HTML
+        if status_code == "signal":
+            sig_html = '<span class="status-signal">SIGNAL</span>'
+        elif status_code == "investigate":
+            sig_html = '<span class="status-investigate">INVESTIGATE</span>'
+        elif status_code == "noise":
+            sig_html = '<span class="status-noise">NOISE</span>'
+        elif status_code == "no_liquidity":
+            sig_html = '<span class="status-no-liquidity">NO LIQUIDITY</span>'
+        else:  # no_data
+            sig_html = '<span class="status-no-data">NO DATA</span>'
 
         if stale:
             delta_cells = ('<td class="cell-stale">⚠</td>'
@@ -569,10 +714,11 @@ def render_price_matrix(rows: list, d3_lbl: str, d24_lbl: str) -> None:
             f'<td class="{"cell-skp" if r["_skp"] else "cell-await"}"   style="text-align:right">{fmt_price(r["_skp"]) if r["_skp"] else "—"}</td>'
             f'<td class="{"cell-beven" if beven else "cell-await"}" style="text-align:right">{beven_str}</td>'
             f'<td class="{multi_cls(m)}" style="text-align:right">{multi_str}</td>'
-            f'<td class="{gap_cls(gap, fired)}" style="text-align:right">{gap_str}</td>'
+            f'<td class="{net_pln_cls(net_pln)}" style="text-align:right">{net_pln_str}</td>'
+            f'<td class="{net_roi_cls(net_roi, status_code)}" style="text-align:right">{net_roi_str}</td>'
             + delta_cells +
             f'<td class="cell-liq">{badge}{bar}</td>'
-            f'<td class="cell-sig">{sig_html}</td>'
+            f'<td class="cell-status">{sig_html}</td>'
             f'</tr>'
         )
 
@@ -655,12 +801,12 @@ def render_item_chart(item_name: str, height: int = 320) -> None:
     ))
     if any(s is not None for s in s_p):
         fig.add_trace(go.Scatter(
-            x=ts_p, y=s_p, mode="lines+markers", name="Skinport (PLN)",
+            x=ts_p, y=s_p, mode="lines+markers", name="CSFloat (PLN)",
             line=dict(color="#ff8c00", width=1.5, dash="dash"),
             marker=dict(size=3, color="#ff8c00", symbol="diamond",
                         line=dict(color="#050709", width=1)),
             connectgaps=False,
-            hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Skinport: %{y:.2f} zł<extra></extra>",
+            hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>CSFloat: %{y:.2f} zł<extra></extra>",
         ))
 
     layout = base_layout()
@@ -720,7 +866,7 @@ def render_item_chart(item_name: str, height: int = 320) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ▲ CS2 SIGNAL TERMINAL")
-    st.caption("Steam + Skinport · PLN · Czas: Europe/Warsaw")
+    st.caption("Steam + CSFloat · PLN · Czas: Europe/Warsaw")
     st.markdown("---")
     st.markdown("## ADD TO WATCHLIST")
     new_item = st.text_input(
@@ -755,13 +901,16 @@ with st.sidebar:
     st.markdown("## LEGENDA")
     st.markdown(
         f'<div style="font-size:0.58rem;color:#3d5166;line-height:2.0">'
-        f'<b style="color:#ffd700">⚡ WYBUCH / LAG</b><br>'
-        f'<span style="padding-left:8px">(Steam − SKP) / Steam &gt; {WYBUCH_THRESHOLD*100:.0f}%</span><br>'
-        f'<span style="padding-left:8px">SKP musi być świeże (&lt; {SKP_FRESHNESS_MIN} min)</span><br>'
-        f'<span style="padding-left:8px">Obie ceny muszą być != NULL</span><br><br>'
+        f'<b style="color:#00c853">SIGNAL</b> - Net ROI 5-20%<br>'
+        f'<b style="color:#ff9500">INVESTIGATE</b> - Net ROI > 20%<br>'
+        f'<span style="color:#ffffff">NOISE</span> - Net ROI < 5%<br>'
+        f'<span style="color:#3d5166">NO LIQUIDITY</span> - Wolumen < 5<br><br>'
+        f'<span style="color:#3d5166">Net PLN = Steam_Receive - Cost</span><br>'
+        f'<span style="color:#3d5166">Net ROI = (Net_PLN / Cost) * 100</span><br>'
+        f'<span style="color:#3d5166">Steam_Receive = Steam_Price / 1.15</span><br><br>'
         f'<span style="color:#3d5166">— = brak danych (Awaiting Data)</span><br>'
         f'<span style="color:#00d4ff">━━</span> Steam &nbsp;'
-        f'<span style="color:#ff8c00">╌╌</span> Skinport'
+        f'<span style="color:#ff8c00">╌╌</span> CSFloat'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -790,7 +939,7 @@ if last_harvest_age is not None and last_harvest_age > 1.0:
 
 st.markdown(
     f'<div class="statusbar">'
-    f'<span>GIEŁDA <span class="hi">STEAM + SKINPORT · PLN</span></span>'
+    f'<span>GIEŁDA <span class="hi">STEAM + CSFLOAT · PLN</span></span>'
     f'<span class="sep">│</span>'
     f'<span>OSTATNI HARVEST <span class="{harvest_cls}">{last_harvest_str}</span>{age_sfx}</span>'
     f'<span class="sep">│</span>'
@@ -852,8 +1001,7 @@ with tab_matrix:
                 "PRICE":       steam,
                 "VOL":         vol,
                 "_skp":        skp,
-                "_gap":        gap,
-                "_wybuch":     fired,
+                "_skp_ts":     skp_ts,
                 "_multiplier": multiplier,
                 "_breakeven":  breakeven,
                 "_liq_tier":   liq_tier,
@@ -863,16 +1011,32 @@ with tab_matrix:
                 "_d24_lbl":    d24["label"],
                 "_spark":      spark,
                 "_stale":      item_stale,
+                "_wybuch":     fired,
+                "_gap":        gap,
             })
 
-        # Sortuj: WYBUCH na górze, potem po gap malejąco, None na dole
-        rows.sort(key=lambda r: (r["_wybuch"], r["_gap"] or 0), reverse=True)
+        # Sortuj: SIGNAL i INVESTIGATE na górze, potem po Net ROI malejąco
+        def sort_key(r):
+            steam_price = r["PRICE"]
+            csfloat_price = r["_skp"]
+            status_code, _, net_roi = determine_status(
+                steam_price, csfloat_price, r.get("_skp_ts"), r["VOL"]
+            )
+            # Priorytet: 1. INVESTIGATE, 2. SIGNAL, 3. Pozostałe
+            priority = 0
+            if status_code == "investigate":
+                priority = 2
+            elif status_code == "signal":
+                priority = 1
+            return (priority, net_roi or 0)
+            
+        rows.sort(key=sort_key, reverse=True)
         visible = [r for r in rows if not (hide_danger and r["_liq_tier"] == "danger")]
 
         if not visible:
             st.caption("Wszystkie itemy odfiltrowane przez płynność.")
         else:
-            render_wybuch_banners(visible)
+            render_signal_banners(visible)
             st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
             d3_lbl  = visible[0]["_d3_lbl"]
             d24_lbl = visible[0]["_d24_lbl"]
@@ -882,17 +1046,35 @@ with tab_matrix:
         st.markdown("---")
         k = st.columns(5)
         n_live   = sum(1 for r in rows if r["PRICE"] and not r["_stale"])
-        n_wybuch = sum(1 for r in rows if r["_wybuch"])
+        
+        # Oblicz liczbę sygnałów według nowych kategorii
+        n_signal = 0
+        n_investigate = 0
+        roi_vals = []
+        
+        for r in rows:
+            steam_price = r["PRICE"]
+            csfloat_price = r["_skp"]
+            status_code, _, net_roi = determine_status(
+                steam_price, csfloat_price, r.get("_skp_ts"), r["VOL"]
+            )
+            if status_code == "signal":
+                n_signal += 1
+            elif status_code == "investigate":
+                n_investigate += 1
+            
+            if net_roi is not None:
+                roi_vals.append(net_roi)
+        
         n_skp    = sum(1 for r in rows if r["_skp"] is not None)
         n_hub    = sum(1 for r in rows if r["_multiplier"] is not None and r["_multiplier"] >= MULTI_GOLDEN)
-        gap_vals = [r["_gap"] * 100 for r in rows if r["_gap"] is not None]
-        avg_gap  = sum(gap_vals) / len(gap_vals) if gap_vals else None
+        avg_roi  = sum(roi_vals) / len(roi_vals) if roi_vals else None
 
         k[0].metric("LIVE DATA",       n_live)
-        k[1].metric("⚡ WYBUCH",       n_wybuch)
-        k[2].metric("💎 TRANSFER HUB", n_hub)
+        k[1].metric("🔔 SIGNAL",       n_signal)
+        k[2].metric("⚠️ INVESTIGATE",  n_investigate)
         k[3].metric("SKP COVERAGE",    f"{n_skp}/{len(watchlist)}")
-        k[4].metric("AVG GAP",         f"{avg_gap:+.1f}%" if avg_gap is not None else "—")
+        k[4].metric("AVG ROI",         f"{avg_roi:.1f}%" if avg_roi is not None else "—")
 
         # Interaktywne wykresy
         st.markdown("---")

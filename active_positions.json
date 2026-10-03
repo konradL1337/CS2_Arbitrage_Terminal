@@ -1,0 +1,35 @@
+[
+  {
+    "timestamp": "2026-07-08T01:15:34.723982",
+    "item_name": "Fracture Case",
+    "category": "Skrzynka",
+    "csfloat_price": 1.84,
+    "steam_net": 2.34,
+    "profit": 0.5,
+    "roi": 27.26,
+    "volume": 21747,
+    "confidence": 0.9661
+  },
+  {
+    "timestamp": "2026-07-08T01:15:34.852678",
+    "item_name": "Recoil Case",
+    "category": "Skrzynka",
+    "csfloat_price": 1.2,
+    "steam_net": 1.44,
+    "profit": 0.24,
+    "roi": 19.88,
+    "volume": 24839,
+    "confidence": 0.9661
+  },
+  {
+    "timestamp": "2026-07-08T01:15:34.959707",
+    "item_name": "Snakebite Case",
+    "category": "Skrzynka",
+    "csfloat_price": 1.69,
+    "steam_net": 2.16,
+    "profit": 0.47,
+    "roi": 27.69,
+    "volume": 11957,
+    "confidence": 0.9653
+  }
+]
