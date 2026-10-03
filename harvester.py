@@ -1,16 +1,19 @@
 
 """
-harvester.py — CS2 Market Analytics Terminal (STEAM-ONLY HARVESTER)
+harvester.py — CS2 Market Analytics Terminal (STEAM ORDER BOOK HARVESTER)
 
 ARCHITEKTURA:
-    - Pobiera TYLKO dane z Steam API (priceoverview)
-    - Ignoruje kolumny: steam_item_id, highest_bid, buy_order_volume (pozostają NULL)
+    - Pobiera dane z Steam API (priceoverview)
+    - Scrapuje steam_item_id z HTML (jednokrotnie, z 10s delay)
+    - Odpytuje Order Book Histogram (highest_bid, buy_order_volume)
     - external_price = NULL (bez CSFloat/Skinport)
-    - Twarde zabezpieczenia: time.sleep(8), exponential backoff 429
+    - Twarde zabezpieczenia: time.sleep(8) główny + time.sleep(10) HTML scraping
+    - Fail-Safe: błędy histogramu nie przerywają głównego cyklu
 
 WYMAGANIA:
-    - Biblioteki: requests, sqlite3, time, logging
-    - Endpoint: https://steamcommunity.com/market/priceoverview/?appid=730&currency=6&market_hash_name=...
+    - Biblioteki: requests, sqlite3, time, logging, re
+    - Endpoint Steam Price: https://steamcommunity.com/market/priceoverview/?appid=730&currency=6&market_hash_name=...
+    - Endpoint Order Book: https://steamcommunity.com/market/itemordershistogram?country=PL&language=polish&currency=6&item_nameid={id}&two_factor=0
     - Waluta: PLN (currency=6)
 """
 
@@ -28,12 +31,20 @@ import requests
 # ─────────────────────────────────────────────────────────────────────────────
 DB_PATH = Path("cs2_market.db")
 STEAM_API_URL = "https://steamcommunity.com/market/priceoverview/?appid=730&currency=6&market_hash_name={name}"
+STEAM_LISTING_URL = "https://steamcommunity.com/market/listings/730/{name}"
+STEAM_HISTOGRAM_URL = "https://steamcommunity.com/market/itemordershistogram?country=PL&language=polish&currency=6&item_nameid={id}&two_factor=0"
+
+# RegEx do wyciągnięcia steam_item_id z HTML
+STEAM_ITEM_ID_RE = re.compile(r'Market_LoadOrderSpread\(\s*(\d+)\s*\)', re.IGNORECASE)
 
 # Exponential backoff dla Steam 429: 5 min → 10 min → 15 min → skip
 BACKOFF_DELAYS_SEC = [5 * 60, 10 * 60, 15 * 60]
 
 # Twarde opóźnienie na koniec każdej iteracji
 ITEM_DELAY_SEC = 8
+
+# Opóźnienie po scrapowaniu HTML (rygorystyczny limit Valve)
+HTML_SCRAPE_DELAY_SEC = 10
 
 # User-Agent (Chrome 124 Windows)
 USER_AGENT = (
@@ -64,24 +75,42 @@ def get_db_connection():
 
 
 def get_watchlist():
-    """Pobiera listę itemów z watchlist."""
+    """
+    Pobiera listę itemów z watchlist wraz z steam_item_id.
+    Zwraca listę tuple: (item_name, steam_item_id).
+    """
     with get_db_connection() as conn:
-        rows = conn.execute("SELECT item_name FROM watchlist ORDER BY item_name;").fetchall()
-    return [row["item_name"] for row in rows]
+        rows = conn.execute("SELECT item_name, steam_item_id FROM watchlist ORDER BY item_name;").fetchall()
+    return [(row["item_name"], row["steam_item_id"]) for row in rows]
 
 
-def insert_price_record(item_name, steam_price, volume):
+def update_steam_item_id(item_name, steam_item_id):
+    """
+    Aktualizuje steam_item_id w tabeli watchlist dla danego itemu.
+    Wykonywane tylko raz, gdy ID zostanie zescrapowane z HTML.
+    """
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE watchlist SET steam_item_id = ? WHERE item_name = ?;",
+            (steam_item_id, item_name),
+        )
+        conn.commit()
+    logger.info("[DB] Zapisano steam_item_id=%s dla '%s'", steam_item_id, item_name)
+
+
+def insert_price_record(item_name, steam_price, volume, highest_bid=None, buy_order_volume=None):
     """
     Zapisuje rekord ceny do price_history.
     external_price zostaje jako NULL.
+    highest_bid i buy_order_volume mogą być NULL jeśli histogram nie jest dostępny.
     """
     with get_db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO price_history (item_name, steam_price, volume, external_price)
-            VALUES (?, ?, ?, NULL);
+            INSERT INTO price_history (item_name, steam_price, volume, external_price, highest_bid, buy_order_volume)
+            VALUES (?, ?, ?, NULL, ?, ?);
             """,
-            (item_name, steam_price, volume),
+            (item_name, steam_price, volume, highest_bid, buy_order_volume),
         )
         conn.commit()
 
@@ -136,15 +165,149 @@ def parse_volume(raw_volume):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Scrapowanie steam_item_id z HTML
+# ─────────────────────────────────────────────────────────────────────────────
+
+def scrape_steam_item_id(item_name):
+    """
+    Scrapuje steam_item_id z kodu HTML strony Market Listings.
+    Zwraca numeryczne ID lub None w przypadku błędu.
+    UWAGA: Ta funkcja jest wywoływana TYLKO RAZ na przedmiot i zawiera time.sleep(10).
+    """
+    url = STEAM_LISTING_URL.format(name=quote(item_name))
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "pl-PL,pl;q=0.9",
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+    except requests.RequestException as exc:
+        logger.error("[HTML] Błąd połączenia podczas scrapowania '%s': %s", item_name, exc)
+        return None
+    
+    if response.status_code != 200:
+        logger.warning("[HTML] HTTP %d podczas scrapowania '%s'", response.status_code, item_name)
+        return None
+    
+    # Szukaj Market_LoadOrderSpread(ITEM_ID)
+    match = STEAM_ITEM_ID_RE.search(response.text)
+    if not match:
+        logger.warning("[HTML] Nie znaleziono steam_item_id w HTML dla '%s'", item_name)
+        return None
+    
+    steam_item_id = match.group(1)
+    logger.info("[HTML] Zescrapowano steam_item_id=%s dla '%s'", steam_item_id, item_name)
+    
+    # Zapisz do bazy
+    update_steam_item_id(item_name, steam_item_id)
+    
+    # BEZWZGLĘDNY DELAY — Valve rygorystycznie limituje scraping HTML
+    logger.info("[HTML] Czekam %d sekund (rygorystyczny limit Valve)...", HTML_SCRAPE_DELAY_SEC)
+    time.sleep(HTML_SCRAPE_DELAY_SEC)
+    
+    return steam_item_id
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pobieranie Order Book Histogram
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_order_book_histogram(steam_item_id, item_name):
+    """
+    Pobiera dane z Order Book Histogram dla danego steam_item_id.
+    Zwraca tuple: (highest_bid, buy_order_volume) lub (None, None) w przypadku błędu.
+    Fail-Safe: błędy NIE przerywają głównego cyklu.
+    """
+    url = STEAM_HISTOGRAM_URL.format(id=steam_item_id)
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "pl-PL,pl;q=0.9",
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+    except requests.RequestException as exc:
+        logger.warning("[HISTOGRAM] Błąd połączenia dla '%s': %s — pomijam histogram", item_name, exc)
+        return None, None
+    
+    if response.status_code == 429:
+        logger.warning("[HISTOGRAM] 429 dla '%s' — pomijam histogram", item_name)
+        return None, None
+    
+    if response.status_code != 200:
+        logger.warning("[HISTOGRAM] HTTP %d dla '%s' — pomijam histogram", response.status_code, item_name)
+        return None, None
+    
+    try:
+        data = response.json()
+    except ValueError:
+        logger.warning("[HISTOGRAM] Nieprawidłowy JSON dla '%s' — pomijam histogram", item_name)
+        return None, None
+    
+    if not data.get("success"):
+        logger.warning("[HISTOGRAM] success=false dla '%s' — pomijam histogram", item_name)
+        return None, None
+    
+    # Wyciąganie highest_bid (w groszach, trzeba podzielić przez 100)
+    highest_bid_raw = data.get("highest_buy_order")
+    highest_bid = None
+    if highest_bid_raw:
+        try:
+            highest_bid = float(highest_bid_raw) / 100.0
+        except (ValueError, TypeError):
+            logger.warning("[HISTOGRAM] Nie można sparsować highest_buy_order dla '%s': %r", item_name, highest_bid_raw)
+    
+    # Alternatywnie z buy_order_graph (pierwsza pozycja)
+    if highest_bid is None:
+        buy_order_graph = data.get("buy_order_graph", [])
+        if buy_order_graph and len(buy_order_graph) > 0:
+            try:
+                highest_bid = float(buy_order_graph[0][0]) / 100.0
+            except (ValueError, TypeError, IndexError):
+                pass
+    
+    # Wyciąganie buy_order_volume z buy_order_summary (HTML z liczbą)
+    buy_order_volume = None
+    buy_order_summary = data.get("buy_order_summary", "")
+    if buy_order_summary:
+        # Format: "<span class=\"market_commodity_orders_header_promote\">12,345</span>"
+        # Wyciągamy liczbę za pomocą RegEx
+        volume_match = re.search(r'>([0-9,\.]+)<', buy_order_summary)
+        if volume_match:
+            volume_str = volume_match.group(1).replace(",", "").replace(".", "")
+            try:
+                buy_order_volume = int(volume_str)
+            except ValueError:
+                logger.warning("[HISTOGRAM] Nie można sparsować buy_order_volume dla '%s': %r", item_name, volume_str)
+    
+    return highest_bid, buy_order_volume
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Pobieranie danych z Steam API
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_steam_item(item_name):
+def fetch_steam_item(item_name, steam_item_id):
     """
     Pobiera dane Steam dla jednego itemu.
+    Jeśli steam_item_id jest dostępne, dodatkowo pobiera Order Book Histogram.
     Zwraca True jeśli sukces, False w przeciwnym razie.
     Implementuje exponential backoff dla 429.
     """
+    # ───────────────────────────────────────────────────────────────────────────
+    # KROK 1: Sprawdź czy mamy steam_item_id, jeśli nie — zescrapuj
+    # ───────────────────────────────────────────────────────────────────────────
+    if not steam_item_id or steam_item_id.strip() == "":
+        logger.info("[SCRAPE] Brak steam_item_id dla '%s' — rozpoczynam scrapowanie...", item_name)
+        steam_item_id = scrape_steam_item_id(item_name)
+        # Jeśli scraping się nie powiódł, kontynuujemy bez Order Book
+        if not steam_item_id:
+            logger.warning("[SCRAPE] Nie udało się uzyskać steam_item_id dla '%s' — kontynuuję bez histogramu", item_name)
+    
+    # ───────────────────────────────────────────────────────────────────────────
+    # KROK 2: Pobierz standardowe dane z priceoverview
+    # ───────────────────────────────────────────────────────────────────────────
     url = STEAM_API_URL.format(name=quote(item_name))
     headers = {
         "User-Agent": USER_AGENT,
@@ -201,17 +364,38 @@ def fetch_steam_item(item_name):
     steam_price = parse_steam_price(raw_price)
     volume = parse_volume(raw_volume)
     
-    if steam_price is None:
-        logger.warning("[STEAM] Nie udało się sparsować ceny dla '%s' — pomijam.", item_name)
+    if steam_price is None or steam_price <= 0.0:
+        logger.warning("[STEAM] Nieprawidłowa cena dla '%s' (%.2f) — pomijam.", item_name, steam_price if steam_price else 0.0)
         return False
     
-    # Zapis do bazy
-    insert_price_record(item_name, steam_price, volume)
+    # ───────────────────────────────────────────────────────────────────────────
+    # KROK 3: Pobierz Order Book Histogram (jeśli mamy steam_item_id)
+    # ───────────────────────────────────────────────────────────────────────────
+    highest_bid = None
+    buy_order_volume = None
     
-    logger.info(
-        "[OK] %-50s | Steam: %7.2f PLN | Volume: %s",
-        item_name[:50], steam_price, volume if volume is not None else "—"
-    )
+    if steam_item_id:
+        highest_bid, buy_order_volume = fetch_order_book_histogram(steam_item_id, item_name)
+    
+    # ───────────────────────────────────────────────────────────────────────────
+    # KROK 4: Zapis do bazy (Fail-Safe: histogram może być NULL)
+    # ───────────────────────────────────────────────────────────────────────────
+    insert_price_record(item_name, steam_price, volume, highest_bid, buy_order_volume)
+    
+    # Log wyników
+    log_parts = [
+        f"[OK] {item_name[:50]:<50}",
+        f"| Steam: {steam_price:7.2f} PLN",
+        f"| Volume: {volume if volume is not None else '—':>6}",
+    ]
+    
+    if highest_bid is not None:
+        log_parts.append(f"| Highest Bid: {highest_bid:7.2f} PLN")
+    
+    if buy_order_volume is not None:
+        log_parts.append(f"| Buy Orders: {buy_order_volume:>6}")
+    
+    logger.info(" ".join(log_parts))
     return True
 
 
@@ -232,8 +416,8 @@ def run_harvest_cycle():
     success_count = 0
     failure_count = 0
     
-    for item_name in watchlist:
-        success = fetch_steam_item(item_name)
+    for item_name, steam_item_id in watchlist:
+        success = fetch_steam_item(item_name, steam_item_id)
         
         if success:
             success_count += 1
@@ -252,8 +436,9 @@ def run_harvest_cycle():
 def main():
     """Główna funkcja uruchamiająca harvester w trybie ciągłym."""
     logger.info("╔═══════════════════════════════════════════════════════════════╗")
-    logger.info("║  CS2 MARKET HARVESTER (STEAM-ONLY)                            ║")
-    logger.info("║  Delay: %d s/item | Backoff: 5/10/15 min                     ║", ITEM_DELAY_SEC)
+    logger.info("║  CS2 MARKET HARVESTER (ORDER BOOK ANALYTICS)                  ║")
+    logger.info("║  Features: Price + Volume + Highest Bid + Buy Order Volume    ║")
+    logger.info("║  Delay: %d s/item | HTML Scrape: %d s | Backoff: 5/10/15 min ║", ITEM_DELAY_SEC, HTML_SCRAPE_DELAY_SEC)
     logger.info("╚═══════════════════════════════════════════════════════════════╝")
     
     while True:
