@@ -6,6 +6,42 @@ export const calcNetPrice = (grossPrice: number): number => {
   return grossPrice / MARKET_CONFIG.steam.feeMultiplier;
 };
 
+// Dynamiczny Target Edge zależny od płynności (volume24h)
+export const calcTargetEdge = (volume24h: number): number => {
+  if (volume24h >= 10000) return 0.09; // hiperpłynne skrzynki
+  if (volume24h >= 1000) return 0.13;
+  if (volume24h >= 100) return 0.17;
+  return 0.22; // bufor ryzyka dla rzadkich przedmiotów
+};
+
+// Max Buy (Bid Limit) = (steamPrice / 1.15) / (1 + targetEdge)
+export const calcMaxBuyPrice = (steamPrice: number, volume24h: number): number => {
+  const netExit = calcNetPrice(steamPrice);
+  const targetEdge = calcTargetEdge(volume24h);
+  return Number((netExit / (1 + targetEdge)).toFixed(2));
+};
+
+// Realny Edge % po zaokrągleniu Max Buy do 2 miejsc
+export const calcRealEdgePercent = (maxBuyPrice: number, steamPrice: number): number => {
+  if (maxBuyPrice <= 0) return 0;
+  const netExit = calcNetPrice(steamPrice);
+  return Number((((netExit - maxBuyPrice) / maxBuyPrice) * 100).toFixed(1));
+};
+
+// Syzyf Dip Score: 0% = cena na absolutnym dołku 24h, 100% = na szczycie
+export const calcDipScore = (steamPrice: number, sparkline: number[]): number => {
+  if (!sparkline || sparkline.length === 0) return 50;
+  const min24h = Math.min(...sparkline);
+  const max24h = Math.max(...sparkline);
+  const range = max24h - min24h || 1;
+  return Number((((steamPrice - min24h) / range) * 100).toFixed(1));
+};
+
+// Ochrona przed penny-stocks: stała opłata Valve zabija zysk na mikro-transakcjach
+export const isPennyStockPrice = (steamPrice: number): boolean => {
+  return steamPrice < MARKET_CONFIG.steam.pennyStockThresholdPLN;
+};
+
 // Edge % = ((Net Exit - Max Buy) / Max Buy) * 100
 export const calcEdgePercent = (maxBuy: number, expectedExitGross: number): number => {
   if (maxBuy <= 0) return 0;

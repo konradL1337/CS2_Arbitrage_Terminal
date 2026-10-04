@@ -5,18 +5,20 @@ export interface MarketItem {
   name: string;
   category: 'case' | 'sticker' | 'skin';
   lowestAsk: number;            // Najniższy sell listing (Steam price)
-  highestBid: number;           // Najwyższy buy order (CSFloat price)
-  spreadPercent: number;        // ((lowestAsk - highestBid) / lowestAsk) * 100
+  highestBid: number;           // Najwyższy buy order (lub fallback = maxBuyPrice)
+  spreadPercent: number;        // ((lowestAsk - maxBuyPrice) / lowestAsk) * 100
   volume24h: number;
-  buyDepth: number;             // Ilość zleceń w arkuszu
-  liquidityScore: number;       // 0 - 100
-  maxBuyPrice: number;          // Sugerowany limit wejścia
+  liquidityScore: number;       // 10 - 100 (skala logarytmiczna z wolumenu)
+  maxBuyPrice: number;          // Sugerowany limit wejścia (Bid Limit)
   expectedExit: number;         // Docelowa cena sprzedaży brutto
   estimatedNetExit: number;     // expectedExit / 1.15
-  estimatedEdgePercent: number; // ((estimatedNetExit - maxBuyPrice) / maxBuyPrice) * 100
-  delta24h: number;             // Zmiana ceny 24h (np. +3.45 lub -1.20)
-  delta7d: number;              // Zmiana ceny 7d (np. +5.12)
-  sparkline: number[];          // Tablica 15-30 cen float dla wykresu
+  estimatedEdgePercent: number; // Realny edge netto po podatku Valve (9/13/17/22%)
+  delta24h: number;             // Zmiana ceny w oknie 24-30 odczytów (np. -2.45)
+  min24h: number;               // Dołek z okna sparkline
+  max24h: number;               // Szczyt z okna sparkline
+  isPennyStock: boolean;        // lowestAsk < 1.00 PLN (minimalna prowizja Valve)
+  dipScore: number;             // Syzyf Dip Score: 0% = dołek 24h, 100% = szczyt
+  sparkline: number[];          // Tablica do 30 cen float (chronologicznie)
   updatedAt: string;
 }
 
@@ -65,16 +67,26 @@ export interface PortfolioState {
   history: GhostTrade[];
 }
 
-// Backend API response type
-export interface BackendMarketItem {
-  item_name: string;
-  steam_price: number | null;
-  csfloat_price: number | null;
-  steam_volume: number | null;
-  sparkline: number[];
+// Backend API response type (/api/market-data)
+export interface ApiMarketItem {
+  id: string;
+  name: string;
+  category: 'case' | 'sticker' | 'skin';
+  lowestAsk: number;
+  highestBid: number;
+  spreadPercent: number;
+  volume24h: number;
+  liquidityScore: number;
+  maxBuyPrice: number;
+  expectedExit: number;
+  estimatedNetExit: number;
+  estimatedEdgePercent: number;
   delta24h: number;
-  delta7d: number;
-  timestamp: string;
+  min24h: number;
+  max24h: number;
+  isPennyStock: boolean;
+  sparkline: number[];
+  updatedAt: string;
 }
 
 // Toast notification types

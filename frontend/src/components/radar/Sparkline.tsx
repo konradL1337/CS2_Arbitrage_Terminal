@@ -2,9 +2,10 @@ interface SparklineProps {
   data: number[];
   width?: number;
   height?: number;
+  positive?: boolean; // Kolor wg delta24h: zielony >= 0, czerwony < 0 (domyślnie: pierwszy vs ostatni punkt)
 }
 
-export const Sparkline = ({ data, width = 80, height = 24 }: SparklineProps) => {
+export const Sparkline = ({ data, width = 80, height = 24, positive }: SparklineProps) => {
   if (!data || data.length < 2) {
     return <div style={{ width, height }} className="bg-[#1f2937]/30 rounded" />;
   }
@@ -22,7 +23,7 @@ export const Sparkline = ({ data, width = 80, height = 24 }: SparklineProps) => 
     })
     .join(' ');
 
-  const isPositive = data[data.length - 1] >= data[0];
+  const isPositive = positive ?? data[data.length - 1] >= data[0];
   const strokeColor = isPositive ? '#10b981' : '#ef4444';
 
   return (

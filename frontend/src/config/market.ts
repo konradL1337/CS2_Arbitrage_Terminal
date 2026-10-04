@@ -3,6 +3,7 @@ export const MARKET_CONFIG = {
   steam: {
     feeMultiplier: 1.15, // Netto = Brutto / 1.15 (13.04% efektywnego podatku)
     minFeePLN: 0.04,
+    pennyStockThresholdPLN: 1.0, // Poniżej tej ceny minimalna prowizja Valve zabija zysk
   },
   portfolio: {
     initialCapitalPLN: 500.0,
