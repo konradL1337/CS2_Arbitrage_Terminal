@@ -22,3 +22,8 @@
 - `frontend/` oraz `api.py` NIE są rozwijane dalej. Trzymane wyłącznie do ręcznego podglądu żywych danych.
 - NIE dodawać nowych komponentów, bibliotek (np. Toastów), logiki Ghost orders.
 - Cały aktywny rozwój: wyłącznie `harvester.py` i `mcp_server.py`.
+
+## 5. ZALEŻNOŚĆ: mcp<2 (CELOWO)
+- Pakiet `mcp` jest CELOWO przypięty poniżej wersji 2.0 (`pip install "mcp<2"`).
+- mcp 2.x to breaking rewrite (FastMCP -> MCPServer, inny import, wymagany ctx: Context).
+- NIE aktualizować bez świadomej, osobnej migracji całego mcp_server.py.
