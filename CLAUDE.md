@@ -17,3 +17,8 @@
 - Never log or expose API keys (always use `os.getenv`).
 - Convert Steam price strings (e.g., "16,50 zł") strictly to floats (16.50).
 - If data fetch fails, return `None` (SQL NULL), never `0.0`.
+
+## 4. FRONTEND / API STATUS: ZAMROŻONE
+- `frontend/` oraz `api.py` NIE są rozwijane dalej. Trzymane wyłącznie do ręcznego podglądu żywych danych.
+- NIE dodawać nowych komponentów, bibliotek (np. Toastów), logiki Ghost orders.
+- Cały aktywny rozwój: wyłącznie `harvester.py` i `mcp_server.py`.
